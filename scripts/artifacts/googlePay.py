@@ -1,13 +1,48 @@
 # Google Pay (GMS)
 # Author:  Koo de Kraker
 # Date 2026-03-06
-# Version: 0.3
+# Version: 0.4
 # Note:  This module parses the Google Pay database found in com.google.android.gms/databases
+#        and enriches transactions with account email from com.google.android.apps.walletnfcrel
 
+import os
+import json
+import sqlite3
+import xml.etree.ElementTree as ET
 import blackboxprotobuf
 
 from scripts.artifact_report import ArtifactHtmlReport
 from scripts.ilapfuncs import logfunc, tsv, timeline, open_sqlite_db_readonly
+
+
+def parse_account_map(files_found):
+    account_map = {}
+    for f in files_found:
+        f = str(f)
+        if f.endswith('global_prefs.xml'):
+            logfunc(f'Google Pay - global_prefs.xml gevonden: {f}')
+            try:
+                tree = ET.parse(f)
+                root = tree.getroot()
+                logfunc(f'Google Pay - XML root tag: {root.tag}, children: {[c.tag for c in root]}')
+                for elem in root.iter():
+                    logfunc(f'Google Pay - XML element: tag={elem.tag}, name={elem.get("name")}, text={str(elem.text)[:80]}')
+                    if elem.get('name') == 'accounts':
+                        accounts_json = elem.text
+                        logfunc(f'Google Pay - accounts JSON raw: {str(accounts_json)[:200]}')
+                        accounts = json.loads(accounts_json)
+                        for account in accounts:
+                            acc_id = str(account.get('id', ''))
+                            acc_email = account.get('name', '')
+                            logfunc(f'Google Pay - account gevonden: id={acc_id}, email={acc_email}')
+                            account_map[acc_id] = acc_email
+            except Exception as e:
+                logfunc(f'Google Pay - failed to parse global_prefs.xml: {e}')
+            break
+    logfunc(f'Google Pay - account_map resultaat: {account_map}')
+    return account_map
+
+
 
 def parse_transaction_proto(blob):
     # Interpretation based on observed data:
@@ -48,7 +83,12 @@ def format_amount(currency, whole, decimal):
     except Exception:
         return ''
 
+
 def get_googlePayGMS(files_found, report_folder, seeker, wrap_text, time_offset):
+
+    # Build account_id -> email map from global_prefs.xml
+    account_map = parse_account_map(files_found)
+
     for file_found in files_found:
         file_found = str(file_found)
         if not file_found.endswith('pay'):
@@ -60,6 +100,7 @@ def get_googlePayGMS(files_found, report_folder, seeker, wrap_text, time_offset)
         cursor.execute('''
             SELECT
                 datetime(timestamp_ms / 1000, 'unixepoch') AS "Timestamp",
+                account_id,
                 transaction_proto
             FROM
                 GpfeTransactions
@@ -73,35 +114,18 @@ def get_googlePayGMS(files_found, report_folder, seeker, wrap_text, time_offset)
             report = ArtifactHtmlReport('Google Pay (GMS)')
             report.start_artifact_report(report_folder, 'Transactions')
             report.add_script()
-            
-            # Add explanation and assumptions to the report
-            description = (
-                'This module parses the <code>GpfeTransactions</code> table from the Google Pay SQLite database '
-                'located at <code>com.google.android.gms/databases/pay</code>.<br><br>'
-                '<b>Amount interpretation (field 3 of transaction_proto):</b><br>'
-                '<ul>'
-                '<li><b>Field 3.1 (Currency):</b> ISO 4217 currency code (e.g. EUR, USD).</li>'
-                '<li><b>Field 3.2 (Whole):</b> The whole currency unit part of the amount (e.g. 6 for €6,50).</li>'
-                '<li><b>Field 3.3 (Decimal):</b> Optional field representing the fractional part. '
-                'The length of this value is variable. The 3 leftmost digits are taken, divided by 10 and rounded '
-                'to obtain the number of cents (0-99).<br>'
-                'Examples: <code>499999</code> → "499" → 49.9 → 50 cents &nbsp;|&nbsp; '
-                '<code>5000000</code> → "500" → 50.0 → 50 cents</li>'
-                '</ul>'
-                '<b>Note:</b> The decimal field interpretation is based on observed data and may not cover all cases. '
-                'Always verify the <i>Whole</i> and <i>Decimal</i> raw columns when in doubt.<br><br>'
-            )
-            report.write_minor_header('Module Description & Assumptions', 'h5')
-            report.write_raw_html(description)
-            
-            data_headers = ('Timestamp', 'Amount (interpreted)', 'Merchant', 'Transaction ID', 'Currency', 'Whole', 'Decimal')
+
+            data_headers = ('Timestamp', 'Amount (interpreted)', 'Merchant', 'Account Email', 'Transaction ID', 'Currency', 'Whole', 'Decimal')
             data_list = []
             for row in all_rows:
-                timestamp  = row[0]
-                proto_blob = row[1]
+                timestamp   = row[0]
+                account_id  = str(row[1]) if row[1] else ''
+                proto_blob  = row[2]
                 currency, whole, decimal, transaction_id, merchant = parse_transaction_proto(proto_blob)
-                amount = format_amount(currency, whole, decimal)
-                data_list.append((timestamp, amount, merchant, transaction_id, currency, whole, decimal))
+                amount      = format_amount(currency, whole, decimal)
+                email = account_map.get(account_id, account_id)
+                logfunc(f'Google Pay - account_id uit DB: "{account_id}", gevonden email: "{email}"')   
+                data_list.append((timestamp, amount, merchant, email, transaction_id, currency, whole, decimal))
 
             report.write_artifact_data_table(data_headers, data_list, file_found)
             report.end_artifact_report()
@@ -120,6 +144,7 @@ def get_googlePayGMS(files_found, report_folder, seeker, wrap_text, time_offset)
 __artifacts__ = {
     "GooglePayGMS": (
         "Google Pay (GMS)",
-        ('*/data/data/com.google.android.gms/databases/pay',),
+        ('*/data/data/com.google.android.gms/databases/pay',
+         '*/data/data/com.google.android.apps.walletnfcrel/shared_prefs/global_prefs.xml'),
         get_googlePayGMS)
 }
