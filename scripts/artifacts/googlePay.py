@@ -4,24 +4,28 @@
 # Version: 0.3
 # Note:  This module parses the Google Pay database found in com.google.android.gms/databases
 
-import os
-import sqlite3
 import blackboxprotobuf
 
 from scripts.artifact_report import ArtifactHtmlReport
 from scripts.ilapfuncs import logfunc, tsv, timeline, open_sqlite_db_readonly
 
-
 def parse_transaction_proto(blob):
+    # Interpretation based on observed data:
+    # Field 3.1 = currency, 3.2 = whole amount, 3.3 = decimal amount (optional)
+    # Field 7    = transaction ID
+    # Field 8    = merchant name
     try:
         message, _ = blackboxprotobuf.decode_message(blob)
         field3 = message.get('3', {})
-        currency = field3.get('1', b'').decode('utf-8') if isinstance(field3.get('1'), bytes) else str(field3.get('1', ''))
-        whole    = field3.get('2', '')
-        decimal  = field3.get('3', '')
-        return currency, whole, decimal
+        currency       = field3.get('1', b'').decode('utf-8') if isinstance(field3.get('1'), bytes) else str(field3.get('1', ''))
+        whole          = field3.get('2', '')
+        decimal        = field3.get('3', '')
+        transaction_id = message.get('7', b'').decode('utf-8') if isinstance(message.get('7'), bytes) else str(message.get('7', ''))
+        merchant       = message.get('8', b'').decode('utf-8') if isinstance(message.get('8'), bytes) else str(message.get('8', ''))
+        return currency, whole, decimal, transaction_id, merchant
     except Exception as e:
-        return '', '', ''
+        return '', '', '', '', ''
+
 
 def format_amount(currency, whole, decimal):
     # Interpretation of the 'decimal' protobuf field (field 3.3):
@@ -43,8 +47,6 @@ def format_amount(currency, whole, decimal):
             return f'{currency} {whole_int:.2f}'
     except Exception:
         return ''
-
-
 
 def get_googlePayGMS(files_found, report_folder, seeker, wrap_text, time_offset):
     for file_found in files_found:
@@ -92,14 +94,14 @@ def get_googlePayGMS(files_found, report_folder, seeker, wrap_text, time_offset)
             report.write_minor_header('Module Description & Assumptions', 'h5')
             report.write_raw_html(description)
             
-            data_headers = ('Timestamp', 'Amount (interpreted)', 'Currency', 'Whole', 'Decimal')
+            data_headers = ('Timestamp', 'Amount (interpreted)', 'Merchant', 'Transaction ID', 'Currency', 'Whole', 'Decimal')
             data_list = []
             for row in all_rows:
                 timestamp  = row[0]
                 proto_blob = row[1]
-                currency, whole, decimal = parse_transaction_proto(proto_blob)
+                currency, whole, decimal, transaction_id, merchant = parse_transaction_proto(proto_blob)
                 amount = format_amount(currency, whole, decimal)
-                data_list.append((timestamp, amount, currency, whole, decimal))
+                data_list.append((timestamp, amount, merchant, transaction_id, currency, whole, decimal))
 
             report.write_artifact_data_table(data_headers, data_list, file_found)
             report.end_artifact_report()
